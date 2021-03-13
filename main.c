@@ -77,7 +77,8 @@ uint32_t readDistance(void);
 /* Tareas perodicas */
 void calculoVelocidad(void const * argument);
 void calculoDistancia(void const * argument);
-void startTarea3(void const * argument);
+void freno(void const * argument);
+void lucesCruce(void const * argument);
 
 /* Variables para depuracion */
 int ContTarea1 = 0;
@@ -89,12 +90,15 @@ float v_actual = 0.0f;
 float d_actual = 0.0f;
 int  intens_frenada = 0;
 int f = 1;
+int l = 0;
+int b = 0;
 
 
 /* mutex */
 SemaphoreHandle_t sem_velocidad = NULL;
 SemaphoreHandle_t sem_distancia = NULL;
 SemaphoreHandle_t sem_freno = NULL;
+SemaphoreHandle_t sem_int_freno = NULL;
 
 /*Prioridades de las Tareas Periodicas*/
 #define PR_TAREA1 2
@@ -102,7 +106,7 @@ SemaphoreHandle_t sem_freno = NULL;
 /*Periodos de las tareas*/
 #define T_TAREA1 250 // calculoVelocidad
 #define T_TAREA2 300 // calculoDistancia
-#define T_TAREA3 150 // freno
+#define T_TAREA3 50 // freno
 #define T_TAREA4 1000 // lucesDeCruce
 
 #define TRUE 1
@@ -134,12 +138,15 @@ int main(void)
   sem_velocidad = xSemaphoreCreateMutex();
 	sem_distancia = xSemaphoreCreateMutex();
 	sem_freno = xSemaphoreCreateMutex();
+	
+	sem_int_freno = xSemaphoreCreateBinary();
 
   /* Create the thread(s) */
   /* definition and creation of Tarea1 */
 	xTaskCreate (calculoVelocidad, (const char *)"LaOtra", configMINIMAL_STACK_SIZE, NULL, 1,NULL);
 	xTaskCreate (calculoDistancia, (const char *)"LaOtra2", configMINIMAL_STACK_SIZE, NULL, 1,NULL);
-	xTaskCreate (startTarea3, (const char *)"LaOtra3", configMINIMAL_STACK_SIZE, NULL, 1,NULL);
+	xTaskCreate (freno, (const char *)"LaOtra3", configMINIMAL_STACK_SIZE, NULL, 1,NULL);
+	xTaskCreate (lucesCruce, (const char *)"LaOtra4", configMINIMAL_STACK_SIZE, NULL, 1,NULL);
 	vTaskStartScheduler (); // arranca el planificador 
 
 
@@ -466,12 +473,13 @@ void calculoDistancia(void const * argument)
 	xLastWakeTime = xTaskGetTickCount();
 	float umbral_distancia = 1000;
 	float distancia = 0;
+	int fren = 0;
+	BaseType_t xHigherPriorityTaskWoken;
   // Infinite loop 
   for(;;)
   {
 		ContTarea2 ++;
-		if( sem_velocidad != NULL )
-			{
+		if( sem_velocidad != NULL ){
 				if( xSemaphoreGive( sem_velocidad ) != pdTRUE )
 				{ // We would expect this call to fail because we cannot give
 					// a semaphore without first "taking" it!
@@ -488,7 +496,7 @@ void calculoDistancia(void const * argument)
 					{ // We would not expect this call to fail because we must have obtained the semaphore to get here.
 					}
 				}
-			}
+		}
 			if( sem_distancia != NULL )
 			{
 				if( xSemaphoreGive( sem_distancia ) != pdTRUE )
@@ -510,12 +518,43 @@ void calculoDistancia(void const * argument)
 					}
 				}
 			}
-			if(distancia < umbral_distancia/2){
+			if(distancia < umbral_distancia/4){
+				HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_SET);
 				f = 1;
-			}else{
+				fren = 4;
+			} else if(distancia < umbral_distancia/2) {
+				HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_SET);
 				f = 0;
+				fren = 3;
+			} else if(distancia < 3*umbral_distancia/4) {
+				HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_SET);
+				f = 0;
+				fren = 2;
+			} else {
+				HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_RESET);
+				f = 0;
+				fren = 0;
 			}
-	  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_SET);
+			if( sem_freno != NULL )
+				{
+					if( xSemaphoreGive( sem_freno ) != pdTRUE ){ 
+						// a semaphore without first "taking" it!
+					}
+					if( xSemaphoreTake(sem_freno, ( TickType_t ) 0 ) )
+					{
+						intens_frenada = fren;
+						// We now have the semaphore and can access the shared resource...
+						// We have finished accessing the shared resource so can free the semaphore.
+						if( xSemaphoreGive( sem_freno ) != pdTRUE )
+						{ // We would not expect this call to fail because we must have obtained the semaphore to get here.
+						}
+					}
+				}
+				if( sem_int_freno != NULL )
+				{
+					xHigherPriorityTaskWoken = pdFALSE;
+					xSemaphoreGiveFromISR( sem_int_freno, &xHigherPriorityTaskWoken );
+				}
 		
 		vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( T_TAREA2 )); 
   }
@@ -525,46 +564,97 @@ void freno(void const * argument)
 {
 	TickType_t xLastWakeTime;
 	xLastWakeTime = xTaskGetTickCount();
+	int freno;
   // Infinite loop 
   for(;;)
   {
-		
-		/*if(distancia < umbral_distancia/2){
-			f = 1;
-		}else{
-			f = 0;
-		}*/
-		
-		/*
-		switch(intens_frenada){
-			case 0:
-			case 1:
-			case 2:
-			case 3:
-				break;
-		}*/
-	  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_SET);
-		
-		vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( T_TAREA3 )); 
+		if( sem_int_freno != NULL )
+		{
+			if( xSemaphoreTake( sem_int_freno, ( TickType_t ) 0 ) )
+			{
+				if( sem_freno != NULL )
+				{
+					if( xSemaphoreGive( sem_freno ) != pdTRUE )
+					{ // We would expect this call to fail because we cannot give
+						// a semaphore without first "taking" it!
+					}
+					
+					// Obtain the semaphore - don't block if the semaphore is not
+					// immediately available.
+					if( xSemaphoreTake(sem_freno, ( TickType_t ) 0 ) )
+					{
+						freno=intens_frenada;
+						// We now have the semaphore and can access the shared resource...
+						// We have finished accessing the shared resource so can free the semaphore.
+						if( xSemaphoreGive( sem_freno ) != pdTRUE )
+						{ // We would not expect this call to fail because we must have obtained the semaphore to get here.
+						}
+					}
+					if( freno == 0){
+						HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
+						HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_RESET);
+						HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_RESET);
+						HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, GPIO_PIN_RESET);
+					}
+					
+					if(freno >= 1){
+						HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_SET);
+						vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( T_TAREA3 ));
+					}
+					if(freno >= 2){
+						HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_SET);
+						vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( T_TAREA3 ));
+					}
+					if(freno >= 3){
+						HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_SET);
+						vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( T_TAREA3 ));
+					}
+					if(freno == 4){
+						HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, GPIO_PIN_SET);
+						vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( T_TAREA3 ));
+					}
+			}
+		}
+	}
+		//vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( T_TAREA3 )); 
   }
 }
 
-void startTarea3(void const * argument)
+void lucesCruce(void const * argument)
 {
 	TickType_t xLastWakeTime;
 	xLastWakeTime = xTaskGetTickCount();
-	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_SET);
-	
-  // Infinite loop 
+	//HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
+	int luz = 0;
+  /* Infinite loop */
   for(;;)
   {
-		ContTarea3 ++;
+		//ContTarea1 ++;
+				/* Lectura del canal ADC0 */
+		ADC_ChannelConfTypeDef sConfig = {0};
+		sConfig.Channel = ADC_CHANNEL_2; // seleccionamos el canal 0
+		sConfig.Rank = 1;
+		sConfig.SamplingTime = ADC_SAMPLETIME_28CYCLES;
+		HAL_ADC_ConfigChannel(&hadc1, &sConfig);
+		HAL_ADC_Start(&hadc1); // comenzamos la conversón AD
+		if(HAL_ADC_PollForConversion(&hadc1, 5) == HAL_OK){
+			l = luz = HAL_ADC_GetValue(&hadc1); // leemos el valor
+			//luz baja, se enciende luz de cruce
+			if(luz < 100){
+				b = 1;
+				HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_SET);
+			} else {
+				b = 0;
+				HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_RESET);
+			}
+		}
+
 		
-	  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_SET);
-		
-		vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( T_TAREA2 )); 
+		vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( T_TAREA4 )); 
   }
 }
+
+
 
 /* Funcion para el tratamiento de interrupciones */
 
