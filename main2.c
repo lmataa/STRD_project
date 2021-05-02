@@ -61,6 +61,12 @@
 ADC_HandleTypeDef hadc1;
 CAN_HandleTypeDef hcan1;
 SPI_HandleTypeDef hspi1;
+CAN_TxHeaderTypeDef pHeader; //declare a specific header for message transmittions
+CAN_RxHeaderTypeDef pRxHeader; //declare header for message reception
+uint32_t TxMailbox; 
+uint8_t ByteSent = 0; //declare byte to be transmitted //declare a receive byte
+uint8_t ByteReceived = 0; //declare a receive byte
+CAN_FilterTypeDef sFilterConfig; //declare CAN filter structure
 
 osThreadId Tarea1Handle;
 osMutexId mutex1Handle;
@@ -102,17 +108,32 @@ int ContTarea2 = 0;
 int ContTarea3 = 0;
 
 /*Variables Compartidas*/
-int sintomas1 = 0;
-int sintomas2 = 0;
+int sintomas1 = 0; //inclinacion
+int rotacionX = 0;
+int rotacionY = 0;
+int sintomas2 = 0; // Agarradfo
+int sintomas3 = 0;// volantazos
 int modo = 1;
 int p = 0;
 int l = 0;
 int b = 0;
+int r = 0;
+float vel = 0.0;
+int diff = 0;
 
+/* Declaraciones para tranmisiones en CAN BUS ------------------------------*/
+CAN_HandleTypeDef hcan1;
+CAN_TxHeaderTypeDef pHeader; //declare a specific header for message transmittions
+CAN_RxHeaderTypeDef pRxHeader; //declare header for message reception
+uint32_t TxMailbox; 
+//uint8_t ByteSent = 0; //declare byte to be transmitted //declare a receive byte
+//uint8_t ByteReceived = 0; //declare a receive byte
+CAN_FilterTypeDef sFilterConfig; //declare CAN filter structure
 
 /* mutex */
 SemaphoreHandle_t sem_sintomas1 = NULL;
 SemaphoreHandle_t sem_sintomas2 = NULL;
+SemaphoreHandle_t sem_sintomas3 = NULL;
 SemaphoreHandle_t sem_modo = NULL;
 SemaphoreHandle_t sem_int_pulsador = NULL;
 
@@ -129,7 +150,7 @@ SemaphoreHandle_t sem_int_pulsador = NULL;
 #define T_TAREA3 500 // relaxVol
 #define T_TAREA4 300 // risgos
 #define T_TAREA5 350 // detPulsador
-
+void InicializaTransmisionesCAN();
 #define TRUE 1
 #define FALSE 0
 
@@ -141,7 +162,7 @@ int main(void)
 {
 
   /* MCU Configuration--------------------------------------------------------*/
-
+	InicializaTransmisionesCAN();
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
@@ -154,12 +175,13 @@ int main(void)
   MX_SPI1_Init();
   MX_CAN1_Init();
 	
-	Inicializa_Acelerometro ();
+	Inicializa_Acelerometro();
 	
   /* Create the mutex(es) */
   /* definition and creation of mutex1 */
   sem_sintomas1 = xSemaphoreCreateMutex();
 	sem_sintomas2 = xSemaphoreCreateMutex();
+	sem_sintomas3 = xSemaphoreCreateMutex();
 	sem_modo = xSemaphoreCreateMutex();
 	
 	sem_int_pulsador = xSemaphoreCreateBinary();
@@ -435,6 +457,29 @@ static void MX_GPIO_Init(void)
 
 
 
+
+void InicializaTransmisionesCAN() {
+
+	pHeader.DLC=1; //give message size of 1 byte
+	pHeader.IDE=CAN_ID_STD; //set identifier to standard
+	pHeader.RTR=CAN_RTR_DATA; //set data type to remote transmission request?
+	pHeader.StdId=0x2FF; //define a standard identifier, used for message identification by filters (##switch this for the other microcontroller##)
+	
+	//filter one (stack light blink)
+	sFilterConfig.FilterFIFOAssignment=CAN_FILTER_FIFO0; //set fifo assignment
+	sFilterConfig.FilterIdHigh=0x2F4<<5; //the ID that the filter looks for (##switch this for the other microcontroller##)
+	sFilterConfig.FilterIdLow=0;
+	sFilterConfig.FilterMaskIdHigh=0;
+	sFilterConfig.FilterMaskIdLow=0;
+	sFilterConfig.FilterScale=CAN_FILTERSCALE_32BIT; //set filter scale
+	sFilterConfig.FilterActivation=ENABLE;
+	
+	HAL_CAN_ConfigFilter(&hcan1, &sFilterConfig); //configure CAN filter
+
+	HAL_CAN_Start(&hcan1); //start CAN
+	HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING); //enable interrupts
+};
+
 /* USER CODE BEGIN Header_StartTarea1 */
 /**
   * @brief  Function implementing the Tarea1 thread.
@@ -483,6 +528,8 @@ void inclinacionCabeza(void const * argument)
 				}
 				if( xSemaphoreTake(sem_sintomas1, ( TickType_t ) 0 ) )
 				{
+					rotacionX = rotX;
+					rotacionY = rotY;
 					if((rotY>0.3||rotY<-0.3)&&(antesY>0.3||antesY<-0.3)){
 						sintomas1 = 1;
 					} else {
@@ -506,30 +553,6 @@ void inclinacionCabeza(void const * argument)
   }
 }
 
-void deteccionVolantazos(void const * argument)
-{
-	TickType_t xLastWakeTime;
-	xLastWakeTime = xTaskGetTickCount();
-	//HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
-  /* Infinite loop */
-  for(;;)
-  {
-		vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( T_TAREA2 )); 
-  }
-}
-
-void relaxVolante(void const * argument)
-{
-	TickType_t xLastWakeTime;
-	xLastWakeTime = xTaskGetTickCount();
-	//HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
-  /* Infinite loop */
-  for(;;)
-  {
-		vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( T_TAREA3 )); 
-  }
-}
-
 void riesgos(void const * argument)
 {
 	TickType_t xLastWakeTime;
@@ -538,6 +561,43 @@ void riesgos(void const * argument)
   /* Infinite loop */
   for(;;)
   {
+		// Se lee la rotacion
+		xSemaphoreGive( sem_sintomas1 );
+		xSemaphoreTake(sem_sintomas1, ( TickType_t ) 0 );
+		int rotacionXriesgos = rotacionX;
+		int rotacionYriesgos = rotacionY;
+		xSemaphoreGive( sem_sintomas1 );
+		
+		//Se lee el sintoma2
+		xSemaphoreGive( sem_sintomas2 );
+		xSemaphoreTake(sem_sintomas2, ( TickType_t ) 0 );
+		int sintomas2riesgos = sintomas2;
+		xSemaphoreGive( sem_sintomas2 );
+		
+		//Se lee el sintoma3
+		xSemaphoreGive( sem_sintomas3 );
+		xSemaphoreTake(sem_sintomas3, ( TickType_t ) 0 );
+		int sintomas3riesgos = sintomas3;
+		xSemaphoreGive( sem_sintomas3 );
+		
+		//Se recibe la velocidad
+		float velocidadRecibida = (float)ByteReceived;
+		vel = velocidadRecibida;
+		//Se recibe la distancia
+		int riesgo = 0;
+		//Manipulando el MÓVIL
+		if(rotacionXriesgos>20 && rotacionYriesgos>20 && sintomas2riesgos==1){
+			riesgo++;
+		}
+		//NO ATIENDE a la carretera
+		if((rotacionXriesgos>20 || rotacionYriesgos>20) && sintomas2riesgos==0 && velocidadRecibida>70){
+			riesgo++;
+		}
+		//SOMNOLENCIA
+		if(rotacionYriesgos>30 && sintomas3riesgos==1 ){
+			riesgo++;
+		}
+		r = riesgo;
 		vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( T_TAREA4 )); 
   }
 }
@@ -551,19 +611,88 @@ void deteccionPulsador(void const * argument)
   for(;;)
   {
 			xSemaphoreTake( sem_int_pulsador,  portMAX_DELAY );
-			xSemaphoreGive( sem_modo )
-			xSemaphoreTake( sem_modo, ( TickType_t ) 0 )
+			xSemaphoreGive( sem_modo );
+			xSemaphoreTake( sem_modo, ( TickType_t ) 0 );
 			modo++;
 			if(modo > 3){
 				modo = 1;
 			}
-			xSemaphoreGive( sem_modo )
+			xSemaphoreGive( sem_modo );
 			
 		
 		ContTarea2 ++;
 		vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( T_TAREA5 )); 
   }
 }
+
+
+void deteccionVolantazos(void const * argument)
+{
+	TickType_t xLastWakeTime;
+	xLastWakeTime = xTaskGetTickCount();
+	int anterior = 0;
+	int veces = 0;
+	//HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
+	
+  for(;;)
+  {
+			int actual = 0; //Valor actual
+			//Lectura del canal ADC0
+			ADC_ChannelConfTypeDef sConfig = {0};
+			sConfig.Channel = ADC_CHANNEL_0; // seleccionamos el canal 0
+			sConfig.Rank = 1;
+			sConfig.SamplingTime = ADC_SAMPLETIME_28CYCLES;
+			HAL_ADC_ConfigChannel(&hadc1, &sConfig);
+			HAL_ADC_Start(&hadc1); // comenzamos la conversón AD
+			if(HAL_ADC_PollForConversion(&hadc1, 5) == HAL_OK){
+				actual = HAL_ADC_GetValue(&hadc1); // leemos el valor
+				//PosicionVolante = actual; // actualizamos una variable global
+			}
+			
+			xSemaphoreGive( sem_sintomas3 );
+			xSemaphoreTake( sem_sintomas3, ( TickType_t ) 0 );
+			int diferencia = anterior - actual;
+			diff = anterior - actual;
+			
+			if(diferencia > 150 || diferencia < -150){
+				sintomas3 = 1;
+				veces = 0;
+			} else {
+				veces++;
+			}
+			if(veces >= 12){
+				sintomas3 = 0;
+			}
+			xSemaphoreGive( sem_sintomas3 );
+			anterior = actual;
+		
+		ContTarea2 ++;
+		vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( T_TAREA2 )); 
+  }
+}
+
+void relaxVolante(void const * argument)
+{
+	TickType_t xLastWakeTime;
+	xLastWakeTime = xTaskGetTickCount();
+  /* Infinite loop */
+  for(;;)
+  {
+			xSemaphoreGive( sem_sintomas2 );
+			xSemaphoreTake( sem_sintomas2, ( TickType_t ) 0 );
+			if(HAL_GPIO_ReadPin(GPIOB,GPIO_PIN_1) == GPIO_PIN_SET){
+				sintomas2 = 1;
+			} else {
+				sintomas2 = 0;
+			}
+			xSemaphoreGive( sem_sintomas2 );
+			
+		ContTarea2 ++;
+		vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( T_TAREA4 )); 
+  }
+}
+
+
 
 
 
